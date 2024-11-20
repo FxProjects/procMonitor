@@ -30,17 +30,14 @@
 #define MAX_PASSWORD_LENGTH 256
 #define MAX_EVENTS 10
 
-/* Перечисление типов событий процесса уже определено в /usr/include/linux/cn_proc.h */
-/* Используем enum what из cn_proc.h */
-
 /* Структура для хранения информации о событии */
 typedef struct proc_event_data {
     enum what what;          // Используем enum what из cn_proc.h
-    pid_t pid;
-    pid_t parent_pid;       // Используется только для PROC_EVENT_FORK, можно убрать при необходимости
-    int exit_code;          // Используется только для PROC_EVENT_EXIT
-    char cmdline[MAX_CMDLINE_LENGTH];
-    const char *username;
+    pid_t pid;               // Для EXEC и EXIT - PID процесса
+    pid_t parent_pid;        // Для FORK - PID родительского процесса
+    int exit_code;           // Для EXIT - код выхода
+    char cmdline[MAX_CMDLINE_LENGTH]; // Для EXEC - командная строка
+    const char *username;    // Для EXEC и EXIT - имя пользователя
 } proc_event_data_t;
 
 /* Узел очереди */
@@ -87,13 +84,84 @@ volatile sig_atomic_t stop = 0;
 /* Функция для обработки сигналов */
 void cleanup(int signo);
 
-/* Функция для получения имени пользователя по UID или "unknown" при ошибке */
-const char* get_username(uid_t uid) {
-    struct passwd *pw = getpwuid(uid);
-    if (pw) {
-        return pw->pw_name;
+#define BUFFER_SIZE 256
+#define CACHE_SIZE 100
+
+/* Структура для хранения кэша */
+typedef struct {
+    uid_t uid;
+    char *username;
+} UserCache;
+
+static UserCache cache[CACHE_SIZE];
+static size_t cache_count = 0;
+
+/* Функция для поиска имени пользователя в кэше */
+const char *find_in_cache(uid_t uid) {
+    for (size_t i = 0; i < cache_count; i++) {
+        if (cache[i].uid == uid) {
+            return cache[i].username;
+        }
     }
-    return "unknown";
+    return NULL;
+}
+
+/* Функция для добавления имени пользователя в кэш */
+void add_to_cache(uid_t uid, const char *username) {
+    if (cache_count < CACHE_SIZE) {
+        cache[cache_count].uid = uid;
+        cache[cache_count].username = strdup(username);
+        cache_count++;
+    }
+}
+
+/* Функция для получения имени пользователя по UID через чтение /etc/passwd */
+const char *get_username(uid_t uid) {
+    /* Сначала проверяем в кэше */
+    const char *cached_username = find_in_cache(uid);
+    if (cached_username) {
+        return cached_username;
+    }
+
+    FILE *passwd_file = fopen("/etc/passwd", "r");
+    if (!passwd_file) {
+        perror("fopen");
+        return "unknown";
+    }
+
+    char line[BUFFER_SIZE];
+    char *username = NULL;
+
+    while (fgets(line, sizeof(line), passwd_file)) {
+        char *token;
+        char *saveptr;
+        char *name;
+        char *x;
+        char *uid_str;
+
+        // Разбиваем строку: формат /etc/passwd -> username:x:uid:gid:info:home:shell
+        name = strtok_r(line, ":", &saveptr); // username
+        x = strtok_r(NULL, ":", &saveptr);   // x (пароль, не используется)
+        uid_str = strtok_r(NULL, ":", &saveptr); // uid
+
+        if (name && uid_str) {
+            if ((uid_t) atoi(uid_str) == uid) {
+                username = strdup(name); // Дублируем имя пользователя
+                break;
+            }
+        }
+    }
+
+    fclose(passwd_file);
+
+    if (!username) {
+        return "unknown";
+    }
+
+    /* Добавляем найденное имя в кэш */
+    add_to_cache(uid, username);
+
+    return username;
 }
 
 /* Функция для получения UID процесса по PID */
@@ -144,7 +212,7 @@ void get_process_cmdline(pid_t pid, char *cmdline, size_t size) {
 }
 
 /* Функция для экранирования строки в формате JSON */
-int json_escape(const char* input, char* output, size_t out_size) {
+int json_escape(const char *input, char *output, size_t out_size) {
     if (input == NULL || output == NULL) return -1;
 
     size_t in_len = strlen(input);
@@ -152,17 +220,38 @@ int json_escape(const char* input, char* output, size_t out_size) {
 
     for (size_t i = 0; i < in_len; i++) {
         unsigned char c = input[i];
-        const char* esc_seq = NULL;
+        const char *esc_seq = NULL;
         size_t esc_len = 0;
 
         switch (c) {
-            case '\"': esc_seq = "\\\""; esc_len = 2; break;
-            case '\\': esc_seq = "\\\\"; esc_len = 2; break;
-            case '\b': esc_seq = "\\b";  esc_len = 2; break;
-            case '\f': esc_seq = "\\f";  esc_len = 2; break;
-            case '\n': esc_seq = "\\n";  esc_len = 2; break;
-            case '\r': esc_seq = "\\r";  esc_len = 2; break;
-            case '\t': esc_seq = "\\t";  esc_len = 2; break;
+            case '\"':
+                esc_seq = "\\\"";
+                esc_len = 2;
+                break;
+            case '\\':
+                esc_seq = "\\\\";
+                esc_len = 2;
+                break;
+            case '\b':
+                esc_seq = "\\b";
+                esc_len = 2;
+                break;
+            case '\f':
+                esc_seq = "\\f";
+                esc_len = 2;
+                break;
+            case '\n':
+                esc_seq = "\\n";
+                esc_len = 2;
+                break;
+            case '\r':
+                esc_seq = "\\r";
+                esc_len = 2;
+                break;
+            case '\t':
+                esc_seq = "\\t";
+                esc_len = 2;
+                break;
             default:
                 if (c < 0x20 || c > 0x7E) {
                     esc_len = 6;
@@ -188,7 +277,7 @@ int json_escape(const char* input, char* output, size_t out_size) {
 
     if (out_index >= out_size) return -1;
     output[out_index] = '\0';
-    return (int)out_index;
+    return (int) out_index;
 }
 
 /* Функция для отправки сообщений всем клиентам или вывода в консоль */
@@ -216,11 +305,12 @@ void print_help(const char *prog_name) {
     printf("Usage: %s [options]\n", prog_name);
     printf("\n");
     printf("Options:\n");
-    printf("  -c, --clients <number>    Максимальное количество одновременных клиентов (по умолчанию: %d)\n", DEFAULT_MAX_CLIENTS);
+    printf("  -c, --clients <number>    Максимальное количество одновременных клиентов (по умолчанию: %d)\n",
+           DEFAULT_MAX_CLIENTS);
     printf("  -s, --socket <path>       Путь к Unix Domain Socket (по умолчанию: %s)\n", DEFAULT_SOCKET_PATH);
     printf("  -t, --tcp <port>          Включает TCP-сокетный режим и устанавливает порт для прослушивания\n");
     printf("  -a, --auth <password>     Устанавливает пароль для аутентификации клиентов в TCP-сокетном режиме\n");
-    printf("  -e, --events <events>     Список событий для отслеживания, разделённых запятыми (например: exec,exit)\n");
+    printf("  -e, --events <events>     Список событий для отслеживания, разделённых запятыми (например: exec,exit,fork)\n");
     printf("  -d, --direct              Включает режим прямого вывода в консоль\n");
     printf("  -h, --help                Отображает эту справочную информацию\n");
     printf("\n");
@@ -364,11 +454,11 @@ void destroy_event_queue(event_queue_t *queue) {
 }
 
 /* Поток приема событий */
-void* event_receiver_thread(void *args) {
+void *event_receiver_thread(void *args) {
     // Распаковка аргументов
-    event_queue_t *queue = ((event_queue_t **)args)[0];
-    program_options *opts = ((program_options **)args)[1];
-    int nl_sock = *((int *)(((event_queue_t **)args)[2]));
+    event_queue_t *queue = ((event_queue_t **) args)[0];
+    program_options *opts = ((program_options **) args)[1];
+    int nl_sock = *((int *) (((event_queue_t **) args)[2]));
 
     while (!stop) {
         char buffer[DEFAULT_BUFFER_SIZE];
@@ -379,10 +469,10 @@ void* event_receiver_thread(void *args) {
             continue;
         }
 
-        struct nlmsghdr *nlh = (struct nlmsghdr *)buffer;
+        struct nlmsghdr *nlh = (struct nlmsghdr *) buffer;
         while (NLMSG_OK(nlh, len)) {
             struct cn_msg *cn_msg = NLMSG_DATA(nlh);
-            struct proc_event *event = (struct proc_event *)cn_msg->data;
+            struct proc_event *event = (struct proc_event *) cn_msg->data;
 
             proc_event_data_t proc_event;
             memset(&proc_event, 0, sizeof(proc_event));
@@ -404,12 +494,17 @@ void* event_receiver_thread(void *args) {
                 } else if (proc_event.what == PROC_EVENT_EXIT) {
                     proc_event.pid = event->event_data.exit.process_pid;
                     proc_event.exit_code = event->event_data.exit.exit_code;
+                } else if (proc_event.what == PROC_EVENT_FORK) {
+                    proc_event.pid = event->event_data.fork.child_pid;
+                    proc_event.parent_pid = event->event_data.fork.parent_pid;
                 }
 
-                // Получение имени пользователя и командной строки
-                if (proc_event.pid > 0) {
-                    proc_event.username = get_username(get_process_uid(proc_event.pid));
-                    get_process_cmdline(proc_event.pid, proc_event.cmdline, sizeof(proc_event.cmdline));
+                // Получение имени пользователя и командной строки (для EXEC и EXIT)
+                if (proc_event.what == PROC_EVENT_EXEC || proc_event.what == PROC_EVENT_EXIT) {
+                    if (proc_event.pid > 0) {
+                        proc_event.username = get_username(get_process_uid(proc_event.pid));
+                        get_process_cmdline(proc_event.pid, proc_event.cmdline, sizeof(proc_event.cmdline));
+                    }
                 }
 
                 enqueue_event(queue, &proc_event);
@@ -423,8 +518,8 @@ void* event_receiver_thread(void *args) {
 }
 
 /* Рабочий поток обработки событий */
-void* worker_thread(void *args) {
-    worker_args_t *w_args = (worker_args_t *)args;
+void *worker_thread(void *args) {
+    worker_args_t *w_args = (worker_args_t *) args;
     event_queue_t *queue = w_args->queue;
     program_options *opts = w_args->opts;
 
@@ -435,11 +530,14 @@ void* worker_thread(void *args) {
         if (dequeue_event(queue, &event)) {
             if (stop) break;
 
-            int esc_len = json_escape(event.cmdline, escaped_cmdline_buffer, sizeof(escaped_cmdline_buffer));
-            if (esc_len == -1) {
-                fprintf(stderr, "Ошибка экранирования cmdline. Используем 'unknown'.\n");
-                strncpy(escaped_cmdline_buffer, "unknown", sizeof(escaped_cmdline_buffer) - 1);
-                escaped_cmdline_buffer[sizeof(escaped_cmdline_buffer) - 1] = '\0';
+            int esc_len = 0;
+            if (event.what == PROC_EVENT_EXEC || event.what == PROC_EVENT_EXIT) {
+                esc_len = json_escape(event.cmdline, escaped_cmdline_buffer, sizeof(escaped_cmdline_buffer));
+                if (esc_len == -1) {
+                    fprintf(stderr, "Ошибка экранирования cmdline. Используем 'unknown'.\n");
+                    strncpy(escaped_cmdline_buffer, "unknown", sizeof(escaped_cmdline_buffer) - 1);
+                    escaped_cmdline_buffer[sizeof(escaped_cmdline_buffer) - 1] = '\0';
+                }
             }
 
             char json[8192]; // Увеличен размер буфера для предотвращения обрезки
@@ -458,8 +556,14 @@ void* worker_thread(void *args) {
                              event.exit_code,
                              event.username);
                     break;
+                case PROC_EVENT_FORK:
+                    snprintf(json, sizeof(json),
+                             "{\"event\":\"fork\", \"child_pid\":%d, \"parent_pid\":%d}\n",
+                             event.pid,
+                             event.parent_pid);
+                    break;
                 default:
-                    // Должны обрабатывать только exec и exit
+                    // Должны обрабатывать только указанные события
                     continue;
             }
 
@@ -538,7 +642,7 @@ int main(int argc, char *argv[]) {
             {"events",  required_argument, 0, 'e'},
             {"direct",  no_argument,       0, 'd'},
             {"help",    no_argument,       0, 'h'},
-            {0,         0,                 0,  0 }
+            {0,         0,                 0, 0}
     };
 
     /* Парсинг аргументов командной строки */
@@ -579,8 +683,7 @@ int main(int argc, char *argv[]) {
                     exit(EXIT_FAILURE);
                 }
                 break;
-            case 'e':
-            {
+            case 'e': {
                 // Разделение списка событий по запятой
                 char *events_str = strdup(optarg);
                 char *token = strtok(events_str, ",");
@@ -673,7 +776,7 @@ int main(int argc, char *argv[]) {
     addr_nl.nl_groups = CN_IDX_PROC;
 
     /* Привязка сокета к адресу */
-    if (bind(nl_sock, (struct sockaddr *)&addr_nl, sizeof(addr_nl)) == -1) {
+    if (bind(nl_sock, (struct sockaddr *) &addr_nl, sizeof(addr_nl)) == -1) {
         perror("bind");
         close(nl_sock);
         if (client_socks) free(client_socks);
@@ -736,7 +839,7 @@ int main(int argc, char *argv[]) {
             server_addr_tcp.sin_port = htons(opts.tcp_port);
 
             /* Привязка TCP-сокета к адресу */
-            if (bind(server_sock, (struct sockaddr *)&server_addr_tcp, sizeof(server_addr_tcp)) == -1) {
+            if (bind(server_sock, (struct sockaddr *) &server_addr_tcp, sizeof(server_addr_tcp)) == -1) {
                 perror("bind");
                 close(nl_sock);
                 close(server_sock);
@@ -786,7 +889,7 @@ int main(int argc, char *argv[]) {
             strncpy(server_addr_unix.sun_path, opts.socket_path, sizeof(server_addr_unix.sun_path) - 1);
 
             /* Привязка серверного сокета к адресу */
-            if (bind(server_sock, (struct sockaddr *)&server_addr_unix, sizeof(server_addr_unix)) == -1) {
+            if (bind(server_sock, (struct sockaddr *) &server_addr_unix, sizeof(server_addr_unix)) == -1) {
                 perror("bind");
                 close(nl_sock);
                 close(server_sock);
@@ -828,7 +931,7 @@ int main(int argc, char *argv[]) {
 
     /* Создание потоков */
     pthread_t event_receiver_tid;
-    void *args_for_receiver[3] = { &event_queue, &opts, &nl_sock };
+    void *args_for_receiver[3] = {&event_queue, &opts, &nl_sock};
     if (pthread_create(&event_receiver_tid, NULL, event_receiver_thread, args_for_receiver) != 0) {
         perror("pthread_create event_receiver");
         close(nl_sock);
@@ -845,7 +948,7 @@ int main(int argc, char *argv[]) {
     /* Создание рабочих потоков */
     int num_workers = 4; // Настроить в зависимости от нагрузки и числа ядер
     pthread_t workers[num_workers];
-    worker_args_t worker_args = { &event_queue, &opts };
+    worker_args_t worker_args = {&event_queue, &opts};
     for (int i = 0; i < num_workers; i++) {
         if (pthread_create(&workers[i], NULL, worker_thread, &worker_args) != 0) {
             perror("pthread_create worker");
@@ -907,7 +1010,7 @@ int main(int argc, char *argv[]) {
                     /* TCP-сокетный режим */
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
-                    int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
+                    int client_sock = accept(server_sock, (struct sockaddr *) &client_addr, &client_len);
                     if (client_sock == -1) {
                         perror("accept");
                         continue;

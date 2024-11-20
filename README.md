@@ -34,9 +34,11 @@ TCP-сокет с аутентификацией: Удалённый досту�
 Скачивание
 Склонируйте репозиторий или загрузите исходный код:
 
+```shell
+git clone https://github.com/FxProjects/procMonitor.git
+cd procMonitor
+```
 
-> git clone https://github.com/FxProjects/procMonitor.git
->cd procMonitor
 
 ### Компиляция
 Используйте предоставленный Makefile для сборки приложения:
@@ -94,20 +96,25 @@ bash
 ### 1. Режим Unix Domain Socket
 Запуск ProcMonitor с Unix Domain Socket по пути /tmp/procMonitor.sock и максимальным количеством клиентов 20:
 
-
-> sudo ./procMonitor --clients 20 --socket /tmp/procMonitor.sock
+```shell
+sudo ./procMonitor --clients 20 --socket /tmp/procMonitor.sock -e exec,fork,exit
+```
 
 ### 2. TCP-сокетный режим с аутентификацией
 Запуск ProcMonitor в TCP-сокетном режиме на порту 8080 с паролем mysecretpassword и максимальным количеством клиентов 50:
 
 
->sudo ./procMonitor --tcp 8080 --auth mysecretpassword --clients 50
+```shell
+sudo ./procMonitor --tcp 8080 --auth mysecretpassword --clients 50 -e exec,fork,exit
+```
 
 ### 3. Прямой вывод в консоль
 Запуск ProcMonitor в режиме прямого вывода в консоль:
 
+```shell
+sudo ./procMonitor --direct -e exec,fork,exit
+```
 
-> sudo ./procMonitor --direct
 
 ## Клиентское Приложение
 Для подключения к ProcMonitor и получения событий можно использовать предоставленный клиент processClient.js на Node.js.
@@ -119,16 +126,25 @@ Node.js: Установите Node.js версии 12 или выше.
 
 ### Использование
 #### 1. Подключение через Unix Domain Socket
-> node processClient.js --socket /tmp/procMonitor.sock
+
+```shell
+node processClient.js --socket /tmp/procMonitor.sock
+```
+
 
 #### 2. Подключение через TCP-сокет с аутентификацией
 В TCP-сокетном режиме используется простой механизм аутентификации по паролю. Убедитесь, что пароль достаточно сложный и хранится в безопасности.
 
->node processClient.js --tcp --host 127.0.0.1 --port 8080 --auth mysecretpassword
+```shell
+node processClient.js --tcp --host 127.0.0.1 --port 8080 --auth mysecretpassword
+
+```
 
 #### 3. Подключение через Unix Domain Socket:
+```shell
+node processClient.js --socket /tmp/procMonitor.sock
+```
 
-> node processClient.js --socket /tmp/procMonitor.sock
 
 Подключение через TCP-сокет:
 
@@ -151,24 +167,35 @@ ProcMonitor выводит информацию о подключениях кл
 ### Завершение Работы
 ProcMonitor корректно обрабатывает сигналы SIGINT и SIGTERM, закрывая все открытые сокеты и освобождая ресурсы перед завершением работы.
 
+### Примеры вывода 
+```json
+{"event":"exit", "pid":4162819, "exit_code":256, "user":"root"}
+{"event":"fork", "child_pid":4162820, "parent_pid":755}
+{"event":"exec", "pid":4162820, "user":"root", "cmdline":"sleep 1 "}
+{"event":"exit", "pid":4162820, "exit_code":0, "user":"unknown"}
+{"event":"fork", "child_pid":4162821, "parent_pid":755}
+```
+
 
 ### Структура проекта
-
->procMonitor/
->├── procMonitor.c          # Исходный код сервера
->├── Makefile               # Файл сборки
->├── processClient.js       # Клиентское приложение на Node.js
->├── README.md              # Документация
-
+```
+ procMonitor/
+ ├── procMonitor.c          # Исходный код сервера
+ ├── Makefile               # Файл сборки
+ ├── processClient.js       # Клиентское приложение на Node.js
+ ├── README.md              # Документация
+```
 ### Внесение изменений
 #### Форк репозитория:
 
 Склонируйте репозиторий и создайте свою ветку:
 
+```shell
+git clone https://github.com/FxProjects/procMonitor.git
+cd procMonitor
+git checkout -b feature/your-feature
+```
 
->git clone https://github.com/FxProjects/procMonitor.git
->cd procMonitor
->git checkout -b feature/your-feature
 
 #### Внесение изменений:
 
@@ -176,11 +203,13 @@ ProcMonitor корректно обрабатывает сигналы SIGINT и
 
 #### Коммит и отправка:
 
+```shell
+git add .
+git commit -m "Добавлена новая функция X"
+git push origin feature/your-feature
 
-> git add .
-> git commit -m "Добавлена новая функция X"
-> git push origin feature/your-feature
-> Создание Pull Request:
+```
+#### Создание Pull Request:
 
 Создайте Pull Request в оригинальный репозиторий для рассмотрения ваших изменений.
 
